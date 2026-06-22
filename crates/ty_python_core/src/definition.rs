@@ -18,7 +18,7 @@ use crate::predicate::PatternPredicate;
 use crate::scope::{FileScopeId, ScopeId};
 use crate::symbol::ScopedSymbolId;
 use crate::unpack::{Unpack, UnpackPosition};
-use crate::use_def::BindingWithConstraintsIterator;
+use crate::use_def::{BindingWithConstraintsIterator, ScopedDefinitionId};
 use crate::{Db, SemanticIndex};
 
 /// A definition of a place.
@@ -1615,8 +1615,10 @@ impl NestedBindingsDefinitionKind {
                 .symbol_id(&self.name)?;
             let use_def = index.use_def_map(declaration.file_scope_id);
             let bindings = match self.execution {
-                NestedBindingExecution::Lazy => use_def.reachable_bindings(symbol.into()),
                 NestedBindingExecution::Eager => use_def.end_of_scope_bindings(symbol.into()),
+                NestedBindingExecution::Lazy | NestedBindingExecution::EagerAtException { .. } => {
+                    use_def.reachable_bindings(symbol.into())
+                }
             };
             Some((declaration.is_global(), bindings))
         })
@@ -1630,6 +1632,10 @@ pub enum NestedBindingExecution {
     Lazy,
     /// The nested scope is modeled as running while evaluating the containing expression.
     Eager,
+    /// An exception escaped after this specific comprehension binding was evaluated.
+    EagerAtException {
+        source_definition: ScopedDefinitionId,
+    },
 }
 
 #[derive(
