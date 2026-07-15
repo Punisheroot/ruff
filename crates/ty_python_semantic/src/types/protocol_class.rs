@@ -1317,7 +1317,6 @@ impl<'db> ProtocolMemberKind<'db> {
                         signatures,
                         current_callable.kind(db),
                         current_callable.provenance(db),
-                        current_callable.deferred_top_materialization(db),
                     ))),
                     kind,
                 )
