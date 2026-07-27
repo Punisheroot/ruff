@@ -93,7 +93,7 @@ impl<'db> ProtocolClass<'db> {
                 return;
             }
             let candidate = candidate.apply_specialization(db, specialization);
-            candidate.walk_recursive_member_types(db, visitor);
+            candidate.walk_recursive_member_types(db, *self, visitor);
         });
     }
 
@@ -1123,6 +1123,24 @@ impl<'db> ProtocolMemberData<'db> {
         }
     }
 
+    fn walk_recursive_types<V: super::visitor::TypeVisitor<'db> + ?Sized>(
+        &self,
+        db: &'db dyn Db,
+        visitor: &V,
+    ) {
+        let access = self.capabilities(db).instance;
+        if let Some(read) = access.read.and_then(|read| read.resolve(db)) {
+            visitor.visit_type(db, read.ty());
+        }
+        if let Some(write) = access
+            .write
+            .and_then(ProtocolMemberWrite::domain)
+            .and_then(|write| write.resolve(db))
+        {
+            visitor.visit_type(db, write.ty());
+        }
+    }
+
     /// Derives the instance/class read/write capabilities exposed by this member.
     ///
     /// These are views of the canonical method, property, or attribute representation below;
@@ -1740,6 +1758,15 @@ fn descriptor_decorated_protocol_member<'db>(
         return None;
     }
 
+    protocol_member_from_descriptor(db, descriptor_ty, protocol, definition)
+}
+
+fn protocol_member_from_descriptor<'db>(
+    db: &'db dyn Db,
+    descriptor_ty: Type<'db>,
+    protocol: ClassType<'db>,
+    definition: Option<Definition<'db>>,
+) -> Option<ProtocolMemberData<'db>> {
     let Place::Defined(DefinedPlace {
         definedness: Definedness::AlwaysDefined,
         ..
@@ -2987,26 +3014,41 @@ impl<'db> ProtocolMemberCandidate<'db> {
     fn walk_recursive_member_types<V: super::visitor::TypeVisitor<'db> + ?Sized>(
         self,
         db: &'db dyn Db,
+        protocol: ClassType<'db>,
         visitor: &V,
     ) {
         match self.ty {
             Type::PropertyInstance(property) => {
-                // A property exposes its getter return and setter value types. Walking the
-                // accessor callables themselves would also visit their receiver and make every
-                // generic protocol property appear recursive.
-                for member in [
+                ProtocolMemberData::property(
                     property.getter(db).map(ProtocolMemberType::property_getter),
-                    property.setter(db).map(ProtocolMemberType::property_setter),
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    if let Some(member) = member.resolve(db) {
-                        visitor.visit_type(db, member.ty());
-                    }
-                }
+                    property
+                        .setter(db)
+                        .map(ProtocolMemberType::property_setter)
+                        .map(ProtocolMemberWrite::from_type),
+                    self.definition,
+                )
+                .walk_recursive_types(db, visitor);
             }
             _ if self.is_bound_method_like(db) => {}
+            _ if self.bound_on_class.is_yes()
+                && self
+                    .definition
+                    .is_some_and(|definition| definition.kind(db).is_function_def()) =>
+            {
+                // The interface builder deliberately keeps a descriptor containing `Unknown`
+                // in its raw form. For recursion detection, however, even an imprecise effective
+                // read or write type can reveal a reference back to the protocol definition.
+                if let Some(member) = protocol_member_from_descriptor(
+                    db,
+                    self.ty.resolve_type_alias(db),
+                    protocol,
+                    self.definition,
+                ) {
+                    member.walk_recursive_types(db, visitor);
+                } else {
+                    visitor.visit_type(db, self.ty);
+                }
+            }
             _ => visitor.visit_type(db, self.ty),
         }
     }

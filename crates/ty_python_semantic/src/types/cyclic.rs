@@ -54,8 +54,8 @@ pub enum TypeIdentity<'db> {
 }
 
 impl<'db> Type<'db> {
-    /// Returns the type that can define recursion for `self`.
-    fn recursive_identity_subject(self, db: &'db dyn Db) -> Self {
+    /// Projects a class-object wrapper onto the instance type whose definition owns its recursion.
+    fn recursive_identity_owner(self, db: &'db dyn Db) -> Self {
         match self {
             Type::GenericAlias(alias) => Type::instance(db, ClassType::Generic(alias)),
             Type::SubclassOf(subclass_of) => subclass_of.to_instance(db),
@@ -73,11 +73,11 @@ impl<'db> Type<'db> {
     /// A `true` result is only a candidate match and must be confirmed with
     /// [`Type::to_type_identity`].
     pub(crate) fn may_share_type_identity(self, db: &'db dyn Db, other: Self) -> bool {
-        let self_subject = self.recursive_identity_subject(db);
-        let other_subject = other.recursive_identity_subject(db);
+        let self_owner = self.recursive_identity_owner(db);
+        let other_owner = other.recursive_identity_owner(db);
 
-        if self_subject != self || other_subject != other {
-            return self_subject.may_share_type_identity(db, other_subject);
+        if self_owner != self || other_owner != other {
+            return self_owner.may_share_type_identity(db, other_owner);
         }
 
         if self == other {
@@ -103,18 +103,19 @@ impl<'db> Type<'db> {
     #[allow(clippy::inline_always)]
     #[inline(always)]
     pub(crate) fn recursive_identity(self, db: &'db dyn Db) -> Option<TypeIdentity<'db>> {
-        let subject = self.recursive_identity_subject(db);
-        if subject != self {
-            return subject.recursive_identity(db);
+        let owner = self.recursive_identity_owner(db);
+        if owner != self {
+            return owner.recursive_identity(db);
         }
 
         match self {
-            // We can create a self-referential function type: e.g. `def f(x: "TypeOf[f]"): reveal_type(x)`
-            // To avoid the difficulty of equality checking for function types containing this, we simply use `literal` for equality checking.
+            // Recursive TypeOf/CallableTypeOf expansion can attach different updated signatures
+            // to the same function literal, so exact FunctionType equality is not stable.
             Type::FunctionLiteral(function) => {
                 Some(TypeIdentity::FunctionLiteral(function.literal(db)))
             }
-            // Similarly, we can create a self-referential NewType: e.g. `T = NewType("T", list["T"])`
+            // A recursive NewType can have different eager base representations while it is
+            // expanded, so exact type equality is not a stable recursion guard.
             Type::NewTypeInstance(newtype) => {
                 Some(TypeIdentity::NewTypeInstance(newtype.definition(db)))
             }
@@ -199,18 +200,36 @@ impl<'db> DefinitionReferenceVisitor<'db> {
     }
 
     fn visit_members(&self, db: &'db dyn Db, ty: Type<'db>) {
-        let mut members = all_members(db, ty).into_iter().collect::<Vec<_>>();
-        members.sort_unstable();
-        for member in members {
+        #[expect(
+            clippy::iter_over_hash_type,
+            reason = "recursive definition reachability is independent of member order"
+        )]
+        for member in all_members(db, ty) {
             // `all_members` synthesizes `__class__: type[Self]` for every nominal instance.
             // Ignore this implicit back-reference so that it does not make every class recursive.
             if member.name == "__class__" {
                 continue;
             }
+            // Unlike ordinary methods, these hooks determine the effective types of dynamically
+            // resolved attributes, so their return types can make the class recursive.
+            if matches!(member.name.as_str(), "__getattr__" | "__getattribute__") {
+                self.visit_callable_return_types(db, member.ty);
+            }
             match member.ty {
                 // Method relations have a separate declaration-based recursion guard.
                 Type::FunctionLiteral(_) | Type::BoundMethod(_) | Type::KnownBoundMethod(_) => {}
                 ty => self.visit_type(db, ty),
+            }
+        }
+    }
+
+    fn visit_callable_return_types(&self, db: &'db dyn Db, ty: Type<'db>) {
+        let Some(callables) = ty.try_upcast_to_callable(db) else {
+            return;
+        };
+        for callable in &callables {
+            for signature in callable.signatures(db) {
+                self.visit_type(db, signature.return_ty);
             }
         }
     }

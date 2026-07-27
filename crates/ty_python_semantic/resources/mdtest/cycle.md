@@ -545,3 +545,73 @@ class Proto[T](Protocol):
 def assign(value: type[Impl[int]]) -> type[Proto[int]]:
     return value  # error: [invalid-return-type]
 ```
+
+## Recursively-specialized descriptor members
+
+Descriptor-backed protocol members can expose recursive specializations through their getter.
+Checking compatibility between such protocols must terminate.
+
+```toml
+[environment]
+python-version = "3.12"
+```
+
+```py
+from __future__ import annotations
+
+from typing import Protocol
+
+class LeftReadDescriptor[T]:
+    def __init__(self, getter: object) -> None: ...
+    def __get__(self, instance: object, owner: type | None = None) -> LeftReadProtocol[list[T]]:
+        raise NotImplementedError
+
+class RightReadDescriptor[T]:
+    def __init__(self, getter: object) -> None: ...
+    def __get__(self, instance: object, owner: type | None = None) -> RightReadProtocol[list[T]]:
+        raise NotImplementedError
+
+class LeftReadProtocol[T](Protocol):
+    @LeftReadDescriptor[T]
+    def child(self) -> object: ...
+
+class RightReadProtocol[T](Protocol):
+    @RightReadDescriptor[T]
+    def child(self) -> object: ...
+
+def assign_read(value: LeftReadProtocol[int]) -> RightReadProtocol[int]:
+    return value  # error: [invalid-return-type]
+```
+
+## Recursively-specialized fallback attribute types
+
+The return types of `__getattr__` and custom `__getattribute__` methods become the effective types
+of protocol members that are not declared directly on a nominal class.
+
+```toml
+[environment]
+python-version = "3.12"
+```
+
+```py
+from __future__ import annotations
+
+from typing import Protocol
+
+class GetattrImpl[T]:
+    def __getattr__(self, name: str) -> GetattrImpl[list[T]]:
+        raise AttributeError(name)
+
+class GetattributeImpl[T]:
+    def __getattribute__(self, name: str) -> GetattributeImpl[list[T]]:
+        raise AttributeError(name)
+
+class Proto[T](Protocol):
+    child: Proto[list[T]]
+
+def assign_getattr(value: GetattrImpl[int]) -> Proto[int]:
+    return value  # error: [invalid-return-type]
+
+def assign_getattribute(value: GetattributeImpl[int]) -> Proto[int]:
+    return value  # error: [invalid-return-type]
+```
