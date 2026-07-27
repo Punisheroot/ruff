@@ -1093,8 +1093,8 @@ impl<'a, 'db> NarrowingProjector<'a, 'db> {
         type Id = ScopedNarrowingConstraint;
         enum Action {
             Visit(Id),
-            AnalyzeResolvedPredicate(Id),
-            FinishResolvedPredicate { id: Id, branch: Id },
+            AnalyzeNonTerminal(Id),
+            FinishNonTerminal { id: Id, branch: Id },
             FinishPredicate(Id),
         }
 
@@ -1116,7 +1116,7 @@ impl<'a, 'db> NarrowingProjector<'a, 'db> {
                         PredicateNode::IsNonTerminalCall(_)
                             | PredicateNode::ContextManagerMaySuppress { .. }
                     ) {
-                        actions.push(Action::AnalyzeResolvedPredicate(id));
+                        actions.push(Action::AnalyzeNonTerminal(id));
                         actions.push(Action::Visit(node.if_uncertain));
                     } else {
                         actions.push(Action::FinishPredicate(id));
@@ -1125,7 +1125,7 @@ impl<'a, 'db> NarrowingProjector<'a, 'db> {
                         actions.push(Action::Visit(node.if_true));
                     }
                 }
-                Action::AnalyzeResolvedPredicate(id) => {
+                Action::AnalyzeNonTerminal(id) => {
                     let node = self.constraints.get_interior_node(id);
                     let predicate = self.predicates[node.atom];
                     let branch = match analyze_single(self.db, &predicate) {
@@ -1135,7 +1135,7 @@ impl<'a, 'db> NarrowingProjector<'a, 'db> {
                     };
 
                     if let Some(branch) = branch {
-                        actions.push(Action::FinishResolvedPredicate { id, branch });
+                        actions.push(Action::FinishNonTerminal { id, branch });
                         actions.push(Action::Visit(branch));
                     } else {
                         actions.push(Action::FinishPredicate(id));
@@ -1144,7 +1144,7 @@ impl<'a, 'db> NarrowingProjector<'a, 'db> {
                         actions.push(Action::Visit(node.if_true));
                     }
                 }
-                Action::FinishResolvedPredicate { id, branch } => {
+                Action::FinishNonTerminal { id, branch } => {
                     let node = self.constraints.get_interior_node(id);
                     let branch = self.projected_node(branch);
                     let if_uncertain = self.projected_node(node.if_uncertain);
