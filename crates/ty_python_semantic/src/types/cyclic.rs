@@ -98,13 +98,6 @@ impl<'db> Type<'db> {
     /// This is a hot-path filter and must not walk either type. A `true` result is only a candidate
     /// match and must be confirmed with [`Type::to_type_identity`].
     pub(crate) fn may_share_type_identity(self, db: &'db dyn Db, other: Self) -> bool {
-        let self_owner = self.type_identity_owner(db);
-        let other_owner = other.type_identity_owner(db);
-
-        if self_owner != self || other_owner != other {
-            return self_owner.may_share_type_identity(db, other_owner);
-        }
-
         if self == other {
             return true;
         }
@@ -121,8 +114,39 @@ impl<'db> Type<'db> {
             }
             (Type::TypeAlias(a), Type::TypeAlias(b)) => a.definition(db) == b.definition(db),
             (Type::TypedDict(a), Type::TypedDict(b)) => a.definition(db) == b.definition(db),
+            (Type::GenericAlias(_) | Type::SubclassOf(_), _)
+            | (_, Type::GenericAlias(_) | Type::SubclassOf(_)) => true,
             _ => false,
         }
+    }
+
+    /// Returns `false` if cheap inspection proves that `self` cannot grow from `active` in a type
+    /// relation cycle.
+    pub(crate) fn may_share_relation_type_identity(self, db: &'db dyn Db, active: Self) -> bool {
+        if self == active {
+            return true;
+        }
+
+        let specializations = match (self, active) {
+            (Type::NominalInstance(current), Type::NominalInstance(active)) => {
+                (current.specialization(db), active.specialization(db))
+            }
+            (Type::ProtocolInstance(current), Type::ProtocolInstance(active)) => {
+                (current.specialization(db), active.specialization(db))
+            }
+            (Type::TypedDict(current), Type::TypedDict(active)) => {
+                (current.specialization(db), active.specialization(db))
+            }
+            (Type::GenericAlias(_) | Type::SubclassOf(_), _)
+            | (_, Type::GenericAlias(_) | Type::SubclassOf(_)) => return true,
+            _ => return self.may_share_type_identity(db, active),
+        };
+
+        let (Some(current), Some(active)) = specializations else {
+            return false;
+        };
+        // Inspect type arguments only after the identities match.
+        current.generic_context(db) == active.generic_context(db)
     }
 
     /// Returns whether equal type identities form a recursive cycle.
@@ -454,7 +478,8 @@ impl<'db> HasIdentity<'db> for (Type<'db>, Type<'db>) {
     type Id = (TypeIdentity<'db>, TypeIdentity<'db>);
 
     fn may_share_identity(&self, db: &'db dyn Db, other: &Self) -> bool {
-        self.0.may_share_type_identity(db, other.0) && self.1.may_share_type_identity(db, other.1)
+        self.0.may_share_relation_type_identity(db, other.0)
+            && self.1.may_share_relation_type_identity(db, other.1)
     }
 
     fn to_identity(&self, db: &'db dyn Db) -> Self::Id {
@@ -474,9 +499,9 @@ where
     type Id = (TypeIdentity<'db>, Context, TypeIdentity<'db>);
 
     fn may_share_identity(&self, db: &'db dyn Db, other: &Self) -> bool {
-        self.0.may_share_type_identity(db, other.0)
+        self.0.may_share_relation_type_identity(db, other.0)
             && self.1 == other.1
-            && self.2.may_share_type_identity(db, other.2)
+            && self.2.may_share_relation_type_identity(db, other.2)
     }
 
     fn to_identity(&self, db: &'db dyn Db) -> Self::Id {
