@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, ops::Deref};
 use itertools::Itertools;
 
 use ruff_python_ast::name::Name;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use crate::types::attribute_write::{
     AttributeWriteRequirement, ClassAttributeWriteMember, ExplicitAttributeWriteRequirement,
@@ -74,27 +74,6 @@ impl<'db> ProtocolClass<'db> {
     pub(super) fn interface(self, db: &'db dyn Db) -> ProtocolInterface<'db> {
         let _span = tracing::trace_span!("protocol_members", "class='{}'", self.name(db)).entered();
         cached_protocol_interface(db, *self)
-    }
-
-    /// Walk the effective non-method member types declared by this protocol.
-    ///
-    /// Method relations have their own declaration-based recursion guard. Keeping them out of this
-    /// walk also avoids requesting a method signature while one of its annotations is being
-    /// inferred.
-    pub(super) fn walk_recursive_member_types<V: super::visitor::TypeVisitor<'db> + ?Sized>(
-        self,
-        db: &'db dyn Db,
-        visitor: &V,
-    ) {
-        let mut seen_members = FxHashSet::default();
-
-        self.for_each_member_candidate(db, |name, candidate, specialization| {
-            if !seen_members.insert(name.clone()) {
-                return;
-            }
-            let candidate = candidate.apply_specialization(db, specialization);
-            candidate.walk_recursive_member_types(db, *self, visitor);
-        });
     }
 
     /// Visits protocol member candidates in MRO order after applying declaration precedence.
@@ -1123,24 +1102,6 @@ impl<'db> ProtocolMemberData<'db> {
         }
     }
 
-    fn walk_recursive_types<V: super::visitor::TypeVisitor<'db> + ?Sized>(
-        &self,
-        db: &'db dyn Db,
-        visitor: &V,
-    ) {
-        let access = self.capabilities(db).instance;
-        if let Some(read) = access.read.and_then(|read| read.resolve(db)) {
-            visitor.visit_type(db, read.ty());
-        }
-        if let Some(write) = access
-            .write
-            .and_then(ProtocolMemberWrite::domain)
-            .and_then(|write| write.resolve(db))
-        {
-            visitor.visit_type(db, write.ty());
-        }
-    }
-
     /// Derives the instance/class read/write capabilities exposed by this member.
     ///
     /// These are views of the canonical method, property, or attribute representation below;
@@ -1758,15 +1719,6 @@ fn descriptor_decorated_protocol_member<'db>(
         return None;
     }
 
-    protocol_member_from_descriptor(db, descriptor_ty, protocol, definition)
-}
-
-fn protocol_member_from_descriptor<'db>(
-    db: &'db dyn Db,
-    descriptor_ty: Type<'db>,
-    protocol: ClassType<'db>,
-    definition: Option<Definition<'db>>,
-) -> Option<ProtocolMemberData<'db>> {
     let Place::Defined(DefinedPlace {
         definedness: Definedness::AlwaysDefined,
         ..
@@ -3000,57 +2952,6 @@ impl<'db> ProtocolMemberCandidate<'db> {
     ) -> Self {
         self.ty = self.ty.apply_optional_specialization(db, specialization);
         self
-    }
-
-    fn is_bound_method_like(self, db: &'db dyn Db) -> bool {
-        self.bound_on_class.is_yes()
-            && match self.ty {
-                Type::FunctionLiteral(_) => true,
-                Type::Callable(callable) => callable.is_method_like(db),
-                _ => false,
-            }
-    }
-
-    fn walk_recursive_member_types<V: super::visitor::TypeVisitor<'db> + ?Sized>(
-        self,
-        db: &'db dyn Db,
-        protocol: ClassType<'db>,
-        visitor: &V,
-    ) {
-        match self.ty {
-            Type::PropertyInstance(property) => {
-                ProtocolMemberData::property(
-                    property.getter(db).map(ProtocolMemberType::property_getter),
-                    property
-                        .setter(db)
-                        .map(ProtocolMemberType::property_setter)
-                        .map(ProtocolMemberWrite::from_type),
-                    self.definition,
-                )
-                .walk_recursive_types(db, visitor);
-            }
-            _ if self.is_bound_method_like(db) => {}
-            _ if self.bound_on_class.is_yes()
-                && self
-                    .definition
-                    .is_some_and(|definition| definition.kind(db).is_function_def()) =>
-            {
-                // The interface builder deliberately keeps a descriptor containing `Unknown`
-                // in its raw form. For recursion detection, however, even an imprecise effective
-                // read or write type can reveal a reference back to the protocol definition.
-                if let Some(member) = protocol_member_from_descriptor(
-                    db,
-                    self.ty.resolve_type_alias(db),
-                    protocol,
-                    self.definition,
-                ) {
-                    member.walk_recursive_types(db, visitor);
-                } else {
-                    visitor.visit_type(db, self.ty);
-                }
-            }
-            _ => visitor.visit_type(db, self.ty),
-        }
     }
 }
 

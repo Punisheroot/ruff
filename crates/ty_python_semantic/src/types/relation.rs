@@ -748,6 +748,11 @@ impl<'db> HasIdentity<'db> for (Type<'db>, Type<'db>, TypeRelation, TypeVarEvalu
             self.3,
         )
     }
+
+    fn is_identity_cycle_with(&self, db: &'db dyn Db, active: &Self) -> bool {
+        self.0.is_relation_type_identity_cycle_with(db, active.0)
+            && self.1.is_relation_type_identity_cycle_with(db, active.1)
+    }
 }
 
 impl<'db, 'c> HasRelationToVisitor<'db, 'c> {
